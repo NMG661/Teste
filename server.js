@@ -1,110 +1,72 @@
-const express = require("express");
 const WebSocket = require("ws");
-const { v4 } = require("uuid");
-const playerlist = require("./playerlist.js");
-
+const express = require("express");
 const app = express();
-const PORT = 9090;
+const PORT = process.env.PORT || 10000;
+
+// Lista de jogadores (exemplo simples, pode ser substituído pelo seu módulo)
+const playerlist = require("./playerlist.js"); // deve ter add(uuid), get(uuid), getAll()
+
+// Servidor HTTP (se quiser usar Express)
 const server = app.listen(PORT, () => {
-    console.log("Server listening on port: " + PORT);
+  console.log(`Servidor rodando na porta ${PORT}`);
 });
 
+// Servidor WebSocket
 const wss = new WebSocket.Server({ server });
 
-wss.on("connection", async (socket) => {
-    const uuid = v4();
-    await playerlist.add(uuid);
-    const newPlayer = await playerlist.get(uuid);
+// Função para gerar UUID
+const { v4: uuidv4 } = require("uuid");
 
-    // Enviar UUID ao cliente
-    socket.send(JSON.stringify({
-        cmd: "joined_server",
-        content: { msg: "Bem-vindo ao servidor!", uuid }
-    }));
+wss.on("connection", async (ws) => {
+  console.log("Novo jogador conectado!");
 
-    // Enviar jogador local
-    socket.send(JSON.stringify({
-        cmd: "spawn_local_player",
-        content: { msg: "Spawning local (you) player!", player: newPlayer }
-    }));
+  // Criar novo jogador
+  const playerUUID = uuidv4();
+  await playerlist.add(playerUUID);
+  const newPlayer = await playerlist.get(playerUUID);
 
-    // Enviar novo jogador para todos os outros
+  // Enviar UUID ao cliente
+  ws.send(JSON.stringify({
+    cmd: "joined_server",
+    content: { msg: "Bem-vindo ao servidor!", uuid: playerUUID }
+  }));
+
+  // Enviar todos os outros jogadores ao novo cliente
+  const allPlayers = await playerlist.getAll();
+  ws.send(JSON.stringify({
+    cmd: "spawn_network_players",
+    content: { msg: "Spawning network players!", players: allPlayers }
+  }));
+
+  // Enviar o jogador local para ele mesmo
+  ws.send(JSON.stringify({
+    cmd: "spawn_local_player",
+    content: { msg: "Spawning local (you) player!", player: newPlayer }
+  }));
+
+  // Receber mensagens do cliente
+  ws.on("message", (message) => {
+    console.log("Recebido:", message.toString());
+
+    // Repassar mensagem para todos os outros jogadores conectados
     wss.clients.forEach((client) => {
-        if (client !== socket && client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({
-                cmd: "spawn_new_player",
-                content: { msg: "Spawning new network player!", player: newPlayer }
-            }));
-        }
+      if (client !== ws && client.readyState === WebSocket.OPEN) {
+        client.send(message.toString());
+      }
     });
+  });
 
-    // Enviar todos os outros jogadores ao novo cliente
-    socket.send(JSON.stringify({
-        cmd: "spawn_network_players",
-        content: {
-            msg: "Spawning network players!",
-            players: await playerlist.getAll()
-        }
-    }));
-
-    socket.on("message", (message) => {
-        let data;
-        try {
-            data = JSON.parse(message.toString());
-        } catch (err) {
-            console.error("Erro ao fazer parse do JSON:", err);
-            return;
-        }
-
-        if (data.cmd === "position") {
-            playerlist.update(uuid, data.content.x, data.content.y);
-
-            const update = {
-                cmd: "update_position",
-                content: {
-                    uuid,
-                    x: data.content.x,
-                    y: data.content.y
-                }
-            };
-
-            wss.clients.forEach((client) => {
-                if (client !== socket && client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify(update));
-                }
-            });
-        }
-
-        if (data.cmd === "chat") {
-            const chat = {
-                cmd: "new_chat_message",
-                content: {
-                    msg: data.content.msg
-                }
-            };
-
-            wss.clients.forEach((client) => {
-                if (client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify(chat));
-                }
-            });
-        }
+  ws.on("close", () => {
+    console.log(`Jogador ${playerUUID} desconectou.`);
+    playerlist.remove(playerUUID); // remover da lista
+    // Avisar todos os outros players
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({
+          cmd: "player_disconnected",
+          content: { id: playerUUID }
+        }));
+      }
     });
-
-    socket.on("close", () => {
-        console.log(`Cliente ${uuid} desconectado.`);
-
-        // Remover da lista
-        playerlist.remove(uuid);
-
-        // Avisar os outros jogadores
-        wss.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({
-                    cmd: "player_disconnected",
-                    content: { uuid }
-                }));
-            }
-        });
-    });
+  });
 });
